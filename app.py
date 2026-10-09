@@ -1,5 +1,7 @@
+
 import asyncio
 import html
+import json
 import logging
 import os
 import re
@@ -54,9 +56,6 @@ async def get_bot_username() -> str:
 
 
 async def check_forced_subscription(user_id: int) -> bool:
-    """
-    التحقق من اشتراك المستخدم في جميع القنوات الإلزامية.
-    """
     channels = await db.list_channels()
 
     if not channels:
@@ -76,11 +75,10 @@ async def check_forced_subscription(user_id: int) -> bool:
             }:
                 return False
 
-        except Exception as exc:
-            log.warning(
-                "Subscription check failed for channel %s: %s",
+        except Exception:
+            log.exception(
+                "Subscription check failed for channel %s",
                 ch["chat_id"],
-                exc,
             )
             return False
 
@@ -96,13 +94,11 @@ async def guard(message: Message) -> bool:
     if await is_banned(message.from_user.id):
         await message.answer("🚫 تم حظرك من استخدام البوت.")
         return False
-
     return True
 
 
 async def send_force_sub(message: Message):
     channels = await db.list_channels()
-
     await message.answer(
         "🔒 <b>الاشتراك مطلوب</b>\n\n"
         "اشترك بالقنوات التالية ثم اضغط «تحقّق من الاشتراك».",
@@ -132,7 +128,6 @@ async def ensure_callback_access(callback: CallbackQuery) -> bool:
             "يجب الاشتراك بالقنوات أولاً.",
             show_alert=True,
         )
-
         await callback.message.edit_text(
             "🔒 <b>الاشتراك مطلوب</b>\n\n"
             "اشترك بالقنوات ثم اضغط التحقق.",
@@ -146,7 +141,6 @@ async def ensure_callback_access(callback: CallbackQuery) -> bool:
 async def parse_referrer(args: str | None) -> int | None:
     if not args:
         return None
-
     match = re.fullmatch(r"ref_(\d+)", args.strip())
     return int(match.group(1)) if match else None
 
@@ -170,6 +164,20 @@ async def prompt_state(uid: int, state: str, data=None):
 
 async def clear_state(uid: int):
     await db.set_state(uid, None, {})
+
+
+def normalize_state_data(data):
+    """
+    asyncpg قد يعيد JSONB كنص JSON حسب إعدادات الاتصال.
+    نحوله إلى قاموس قبل استخدام بيانات الجلسة.
+    """
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+
+    return data if isinstance(data, dict) else {}
 
 
 # ---------------------------- user UI ----------------------------
@@ -203,10 +211,8 @@ async def start(message: Message, command: CommandStart):
 async def check_sub(callback: CallbackQuery):
     if await check_forced_subscription(callback.from_user.id):
         await db.finalize_referral(callback.from_user.id)
-
         await callback.answer("تم التحقق بنجاح ✅")
         await callback.message.delete()
-
         await callback.message.answer(
             f"✨ أهلاً بك في <b>{settings.bot_name}</b>",
             reply_markup=main_menu(),
@@ -224,7 +230,6 @@ async def profile(message: Message):
         return
 
     user = await db.get_user(message.from_user.id)
-
     await message.answer(
         f"""👤 <b>معلومات ملفك</b>
 
@@ -241,7 +246,6 @@ async def referral(message: Message):
 
     username = await get_bot_username()
     link = f"https://t.me/{username}?start=ref_{message.from_user.id}"
-
     reward = await db.get_setting("referral_reward", "0")
 
     await message.answer(
@@ -257,7 +261,6 @@ async def withdrawal_start(message: Message):
         return
 
     info = await db.get_setting("withdrawal_info")
-
     await prompt_state(message.from_user.id, "withdraw_amount")
 
     await message.answer(
@@ -281,9 +284,7 @@ async def contact_start(message: Message):
         return
 
     await prompt_state(message.from_user.id, "contact")
-    await message.answer(
-        "📨 أرسل رسالتك، وسيتم تحويلها للإدارة."
-    )
+    await message.answer("📨 أرسل رسالتك، وسيتم تحويلها للإدارة.")
 
 
 @dp.message(F.text == "📢 اشترك بالعروض")
@@ -297,33 +298,21 @@ async def offers(message: Message):
         await message.answer("📢 لا توجد عروض حالياً.")
         return
 
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
     for row in rows:
-        text = (
-            f'🛍 <b>{row["title"]}</b>\n\n'
-            f'{row["description"]}'
-        )
+        text = f'🛍 <b>{row["title"]}</b>\n\n{row["description"]}'
 
         if row["url"]:
-            from aiogram.types import (
-                InlineKeyboardMarkup,
-                InlineKeyboardButton,
-            )
-
             keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="🔗 فتح العرض",
-                            url=row["url"],
-                        )
-                    ]
-                ]
+                inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="🔗 فتح العرض",
+                        url=row["url"],
+                    )
+                ]]
             )
-
-            await message.answer(
-                text,
-                reply_markup=keyboard,
-            )
+            await message.answer(text, reply_markup=keyboard)
         else:
             await message.answer(text)
 
@@ -341,7 +330,6 @@ async def ai_start(message: Message):
         return
 
     await prompt_state(message.from_user.id, "ai")
-
     await message.answer(
         "🤖 اكتب سؤالك الآن، وسأجيبك بالذكاء الاصطناعي."
     )
@@ -362,7 +350,6 @@ async def admin_command(message: Message):
         return
 
     await clear_state(uid)
-
     await message.answer(
         f"🛠 <b>لوحة إدارة {settings.bot_name}</b>",
         reply_markup=admin_menu(),
@@ -373,7 +360,6 @@ async def admin_command(message: Message):
 async def my_id_command(message: Message):
     uid = message.from_user.id
     status = "أدمن ✅" if is_admin(uid) else "ليس ضمن ADMIN_IDS"
-
     await message.answer(
         f"🆔 رقم حسابك: <code>{uid}</code>\n"
         f"الحالة: {status}"
@@ -386,7 +372,6 @@ async def show_menu_command(message: Message):
         return
 
     await clear_state(message.from_user.id)
-
     await message.answer(
         "📋 القائمة الرئيسية",
         reply_markup=main_menu(),
@@ -399,7 +384,6 @@ async def back_to_main_menu(message: Message):
         return
 
     await clear_state(message.from_user.id)
-
     await message.answer(
         "📋 القائمة الرئيسية",
         reply_markup=main_menu(),
@@ -409,7 +393,6 @@ async def back_to_main_menu(message: Message):
 @dp.message(F.text == "🙈 إخفاء القائمة")
 async def hide_menu(message: Message):
     from aiogram.types import ReplyKeyboardRemove
-
     await message.answer(
         "تم إخفاء القائمة. لإظهارها مجدداً أرسل /menu",
         reply_markup=ReplyKeyboardRemove(),
@@ -424,6 +407,10 @@ async def all_text(message: Message):
         return
 
     state, data = await db.get_state(message.from_user.id)
+
+    # إصلاح مهم: تحويل state_data إلى قاموس إن رجعت كنص JSON.
+    data = normalize_state_data(data)
+
     text = (message.text or "").strip()
 
     if (
@@ -439,7 +426,7 @@ async def all_text(message: Message):
 
     await db.finalize_referral(message.from_user.id)
 
-    # الخطوة الأولى: استقبال مبلغ السحب والتحقق منه.
+    # الخطوة الأولى: استقبال مبلغ السحب.
     if state == "withdraw_amount":
         try:
             amount = Decimal(text.replace(",", "."))
@@ -470,12 +457,9 @@ async def all_text(message: Message):
         user = await db.get_user(message.from_user.id)
         if not user or Decimal(user["balance"]) < amount:
             await clear_state(message.from_user.id)
-            await message.answer(
-                "❌ رصيدك غير كافٍ لهذا المبلغ."
-            )
+            await message.answer("❌ رصيدك غير كافٍ لهذا المبلغ.")
             return
 
-        # نحفظ المبلغ مؤقتاً ونطلب رقم Tel Cash.
         await prompt_state(
             message.from_user.id,
             "withdraw_tel_cash",
@@ -489,57 +473,89 @@ async def all_text(message: Message):
         )
         return
 
-    # الخطوة الثانية: استقبال رقم Tel Cash وإنشاء طلب السحب.
+    # الخطوة الثانية: استقبال رقم Tel Cash.
     if state == "withdraw_tel_cash":
         raw_number = text
 
         if not re.fullmatch(r"\+?[0-9][0-9 \-]{5,18}[0-9]", raw_number):
             await message.answer(
                 "❌ رقم الحساب غير صحيح.\n"
-                "أرسل رقم Tel Cash بالأرقام فقط، ويمكنك استخدام + أو مسافات أو شرطات."
+                "أرسل رقم Tel Cash بالأرقام، ويمكنك استخدام + أو مسافات أو شرطات."
             )
             return
 
         tel_cash_number = re.sub(r"[ \-]", "", raw_number)
 
+        # محاولة استعادة البيانات من قاعدة البيانات إذا كانت فارغة.
+        saved_data = data or {}
+        if not saved_data.get("amount"):
+            try:
+                _, saved_data = await db.get_state(message.from_user.id)
+                saved_data = normalize_state_data(saved_data)
+            except Exception:
+                log.exception("Failed to reload withdrawal state")
+
         try:
-            amount = Decimal(str(data["amount"]))
+            amount_value = (saved_data or {}).get("amount")
+            if amount_value is None:
+                raise ValueError("withdrawal amount is missing")
+
+            amount = Decimal(str(amount_value))
             if not amount.is_finite() or amount <= 0:
-                raise InvalidOperation
+                raise ValueError("invalid withdrawal amount")
+
         except (KeyError, InvalidOperation, ValueError, TypeError):
+            log.warning(
+                "Withdrawal session missing amount for user %s; data=%r",
+                message.from_user.id,
+                saved_data,
+            )
             await clear_state(message.from_user.id)
             await message.answer(
-                "❌ انتهت جلسة طلب السحب. اضغط «💸 سحب رصيد» وابدأ من جديد."
+                "❌ لم أتمكن من استعادة مبلغ السحب.\n"
+                "اضغط «💸 سحب رصيد» وابدأ من جديد."
             )
             return
 
-        result = await db.create_withdrawal(
-            message.from_user.id,
-            amount,
-            tel_cash_number,
-        )
-
-        await clear_state(message.from_user.id)
+        try:
+            result = await db.create_withdrawal(
+                message.from_user.id,
+                amount,
+                tel_cash_number,
+            )
+        except Exception:
+            log.exception(
+                "Failed to create withdrawal for user %s",
+                message.from_user.id,
+            )
+            await message.answer(
+                "⚠️ حدث خطأ أثناء إنشاء طلب السحب. "
+                "حاول مرة أخرى بعد قليل."
+            )
+            return
 
         if result == "pending":
+            await clear_state(message.from_user.id)
             await message.answer(
                 "⏳ لديك طلب سحب قيد المراجعة بالفعل."
             )
             return
 
         if result is None:
+            await clear_state(message.from_user.id)
             await message.answer(
                 "❌ رصيدك غير كافٍ لهذا المبلغ، أو تعذر إنشاء الطلب."
             )
             return
 
+        await clear_state(message.from_user.id)
+
         user = await db.get_user(message.from_user.id)
         safe_number = html.escape(tel_cash_number)
 
         await message.answer(
-            f"✅ تم إرسال طلب السحب رقم "
-            f"<code>#{result}</code> بقيمة "
-            f"<b>{money(amount)}</b>.\n"
+            f"✅ تم إرسال طلب السحب رقم <code>#{result}</code> "
+            f"بقيمة <b>{money(amount)}</b>.\n"
             f"📱 رقم Tel Cash: <code>{safe_number}</code>\n"
             "سيتم مراجعته من الإدارة."
         )
@@ -548,10 +564,10 @@ async def all_text(message: Message):
             try:
                 await bot.send_message(
                     admin_id,
-                    f'💸 <b>طلب سحب جديد #{result}</b>\n\n'
+                    f"💸 <b>طلب سحب جديد #{result}</b>\n\n"
                     f'👤 المستخدم: <code>{user["id"]}</code>\n'
-                    f'💰 المبلغ: <b>{money(amount)}</b>\n'
-                    f'📱 Tel Cash: <code>{safe_number}</code>\n'
+                    f"💰 المبلغ: <b>{money(amount)}</b>\n"
+                    f"📱 Tel Cash: <code>{safe_number}</code>\n"
                     f'👥 الإحالات: <b>{user["referrals"]}</b>',
                     reply_markup=withdrawal_actions(result),
                 )
@@ -560,12 +576,10 @@ async def all_text(message: Message):
                     "Failed to notify admin %s about withdrawal",
                     admin_id,
                 )
-
         return
 
     if state == "gift_code":
         await clear_state(message.from_user.id)
-
         ok, result = await db.redeem_gift(
             message.from_user.id,
             text,
@@ -577,12 +591,10 @@ async def all_text(message: Message):
             )
         else:
             await message.answer(f"❌ {result}")
-
         return
 
     if state == "contact":
         await clear_state(message.from_user.id)
-
         user = await db.get_user(message.from_user.id)
         sent = False
 
@@ -596,10 +608,10 @@ async def all_text(message: Message):
             try:
                 await bot.send_message(
                     admin_id,
-                    f'📨 <b>رسالة من مستخدم</b>\n\n'
+                    f"📨 <b>رسالة من مستخدم</b>\n\n"
                     f'🆔 <code>{user["id"]}</code>\n'
                     f'👤 @{html.escape(user["username"] or "-")}\n\n'
-                    f'{html.escape(text)}',
+                    f"{html.escape(text)}",
                 )
                 sent = True
             except Exception:
@@ -608,13 +620,11 @@ async def all_text(message: Message):
                     admin_id,
                 )
 
-        if sent:
-            await message.answer("✅ تم إرسال رسالتك للإدارة.")
-        else:
-            await message.answer(
-                "⚠️ تعذر إرسال الرسالة حالياً."
-            )
-
+        await message.answer(
+            "✅ تم إرسال رسالتك للإدارة."
+            if sent
+            else "⚠️ تعذر إرسال الرسالة حالياً."
+        )
         return
 
     if state == "ai":
@@ -623,10 +633,7 @@ async def all_text(message: Message):
         try:
             from openai import AsyncOpenAI
 
-            client = AsyncOpenAI(
-                api_key=settings.openai_api_key
-            )
-
+            client = AsyncOpenAI(api_key=settings.openai_api_key)
             response = await client.responses.create(
                 model=settings.openai_model,
                 instructions=(
@@ -636,22 +643,14 @@ async def all_text(message: Message):
                 input=text,
             )
 
-            answer = (
-                response.output_text.strip()
-                or "لم أستطع توليد إجابة."
-            )
-
-            await message.answer(
-                html.escape(answer)
-            )
+            answer = response.output_text.strip() or "لم أستطع توليد إجابة."
+            await message.answer(html.escape(answer))
 
         except Exception:
             log.exception("OpenAI request failed")
-
             await message.answer(
                 "⚠️ حدث خطأ مؤقت في خدمة الذكاء الاصطناعي."
             )
-
         return
 
     if text and not text.startswith("/"):
@@ -667,20 +666,15 @@ async def all_text(message: Message):
 @dp.callback_query(F.data.startswith("adm:"))
 async def admin_callback(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
-        await callback.answer(
-            "غير مصرح.",
-            show_alert=True,
-        )
+        await callback.answer("غير مصرح.", show_alert=True)
         return
 
     await callback.answer()
-
     action = callback.data.split(":", 1)[1]
     uid = callback.from_user.id
 
     if action == "home":
         await clear_state(uid)
-
         await callback.message.edit_text(
             f"🛠 <b>لوحة إدارة {settings.bot_name}</b>",
             reply_markup=admin_menu(),
@@ -688,7 +682,6 @@ async def admin_callback(callback: CallbackQuery):
 
     elif action == "add_balance":
         await prompt_state(uid, "adm_add_balance")
-
         await callback.message.edit_text(
             "➕ أرسل: <code>USER_ID|AMOUNT</code>",
             reply_markup=back_button("adm:home"),
@@ -696,7 +689,6 @@ async def admin_callback(callback: CallbackQuery):
 
     elif action == "deduct_balance":
         await prompt_state(uid, "adm_deduct_balance")
-
         await callback.message.edit_text(
             "➖ أرسل: <code>USER_ID|AMOUNT</code>",
             reply_markup=back_button("adm:home"),
@@ -704,7 +696,6 @@ async def admin_callback(callback: CallbackQuery):
 
     elif action == "create_gift":
         await prompt_state(uid, "adm_gift")
-
         await callback.message.edit_text(
             "🎁 أرسل: <code>CODE|AMOUNT|MAX_USES|YYYY-MM-DD</code>\n"
             "آخر جزء اختياري.",
@@ -713,7 +704,6 @@ async def admin_callback(callback: CallbackQuery):
 
     elif action == "user_logs":
         await prompt_state(uid, "adm_logs")
-
         await callback.message.edit_text(
             "🔎 أرسل ID المستخدم:",
             reply_markup=back_button("adm:home"),
@@ -721,20 +711,17 @@ async def admin_callback(callback: CallbackQuery):
 
     elif action == "stats":
         stats = await db.stats()
-
         await callback.message.edit_text(
             f'📊 <b>الإحصائيات</b>\n\n'
             f'👥 المشتركين: <b>{stats["users"]}</b>\n'
             f'💰 مجموع الأرصدة: <b>{money(stats["balance"])}</b>\n'
             f'👥 مجموع الإحالات: <b>{stats["referrals"]}</b>\n'
-            f'💸 طلبات سحب معلقة: '
-            f'<b>{stats["pending_withdrawals"]}</b>',
+            f'💸 طلبات سحب معلقة: <b>{stats["pending_withdrawals"]}</b>',
             reply_markup=back_button("adm:home"),
         )
 
     elif action == "balances":
         stats = await db.stats()
-
         await callback.message.edit_text(
             f'💰 <b>معلومات الأرصدة</b>\n'
             f'إجمالي الأرصدة: <b>{money(stats["balance"])}</b>',
@@ -742,9 +729,10 @@ async def admin_callback(callback: CallbackQuery):
         )
 
     elif action in {"ban", "unban"}:
-        state = "adm_ban" if action == "ban" else "adm_unban"
-        await prompt_state(uid, state)
-
+        await prompt_state(
+            uid,
+            "adm_ban" if action == "ban" else "adm_unban",
+        )
         await callback.message.edit_text(
             "🚫 أرسل ID المستخدم:",
             reply_markup=back_button("adm:home"),
@@ -762,9 +750,8 @@ async def admin_callback(callback: CallbackQuery):
 
         for row in rows:
             safe_number = html.escape(
-                str(row.get("tel_cash_number") or "-")
+                str(row["tel_cash_number"] or "-")
             )
-
             await callback.message.answer(
                 f'💸 <b>طلب #{row["id"]}</b>\n'
                 f'🆔 <code>{row["user_id"]}</code>\n'
@@ -777,7 +764,6 @@ async def admin_callback(callback: CallbackQuery):
 
     elif action == "add_channel":
         await prompt_state(uid, "adm_add_channel")
-
         await callback.message.edit_text(
             "📣 أرسل: <code>CHAT_ID|TITLE|JOIN_URL</code>\n"
             "مثال: <code>@mychannel|قناتي|https://t.me/mychannel</code>",
@@ -786,7 +772,6 @@ async def admin_callback(callback: CallbackQuery):
 
     elif action == "del_channel":
         rows = await db.list_channels()
-
         if not rows:
             await callback.message.edit_text(
                 "لا توجد قنوات.",
@@ -794,31 +779,20 @@ async def admin_callback(callback: CallbackQuery):
             )
             return
 
-        from aiogram.types import (
-            InlineKeyboardMarkup,
-            InlineKeyboardButton,
-        )
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=f'🗑 {row["title"]}',
-                        callback_data=f'adm_delch:{row["id"]}',
-                    )
-                ]
+                [InlineKeyboardButton(
+                    text=f'🗑 {row["title"]}',
+                    callback_data=f'adm_delch:{row["id"]}',
+                )]
                 for row in rows
-            ]
-            + [
-                [
-                    InlineKeyboardButton(
-                        text="↩️ رجوع",
-                        callback_data="adm:home",
-                    )
-                ]
-            ]
+            ] + [[InlineKeyboardButton(
+                text="↩️ رجوع",
+                callback_data="adm:home",
+            )]]
         )
-
         await callback.message.edit_text(
             "اختر القناة للحذف:",
             reply_markup=keyboard,
@@ -826,7 +800,6 @@ async def admin_callback(callback: CallbackQuery):
 
     elif action == "add_offer":
         await prompt_state(uid, "adm_add_offer")
-
         await callback.message.edit_text(
             "🛍 أرسل: <code>TITLE|DESCRIPTION|URL</code>\n"
             "الرابط اختياري.",
@@ -835,7 +808,6 @@ async def admin_callback(callback: CallbackQuery):
 
     elif action == "del_offer":
         rows = await db.list_offers()
-
         if not rows:
             await callback.message.edit_text(
                 "لا توجد عروض.",
@@ -843,89 +815,61 @@ async def admin_callback(callback: CallbackQuery):
             )
             return
 
-        from aiogram.types import (
-            InlineKeyboardMarkup,
-            InlineKeyboardButton,
-        )
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=f'🗑 {row["title"]}',
-                        callback_data=f'adm_deloff:{row["id"]}',
-                    )
-                ]
+                [InlineKeyboardButton(
+                    text=f'🗑 {row["title"]}',
+                    callback_data=f'adm_deloff:{row["id"]}',
+                )]
                 for row in rows
-            ]
-            + [
-                [
-                    InlineKeyboardButton(
-                        text="↩️ رجوع",
-                        callback_data="adm:home",
-                    )
-                ]
-            ]
+            ] + [[InlineKeyboardButton(
+                text="↩️ رجوع",
+                callback_data="adm:home",
+            )]]
         )
-
         await callback.message.edit_text(
             "اختر العرض للحذف:",
             reply_markup=keyboard,
         )
 
     elif action == "settings":
-        from aiogram.types import (
-            InlineKeyboardMarkup,
-            InlineKeyboardButton,
-        )
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="🎁 مكافأة الإحالة",
-                        callback_data="admset:referral",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="💸 الحد الأدنى للسحب",
-                        callback_data="admset:minwd",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="📝 رسالة الترحيب",
-                        callback_data="admset:welcome",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="📨 وسيلة التواصل",
-                        callback_data="admset:contact",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="ℹ️ معلومات السحب",
-                        callback_data="admset:wdinfo",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="↩️ رجوع",
-                        callback_data="adm:home",
-                    )
-                ],
+                [InlineKeyboardButton(
+                    text="🎁 مكافأة الإحالة",
+                    callback_data="admset:referral",
+                )],
+                [InlineKeyboardButton(
+                    text="💸 الحد الأدنى للسحب",
+                    callback_data="admset:minwd",
+                )],
+                [InlineKeyboardButton(
+                    text="📝 رسالة الترحيب",
+                    callback_data="admset:welcome",
+                )],
+                [InlineKeyboardButton(
+                    text="📨 وسيلة التواصل",
+                    callback_data="admset:contact",
+                )],
+                [InlineKeyboardButton(
+                    text="ℹ️ معلومات السحب",
+                    callback_data="admset:wdinfo",
+                )],
+                [InlineKeyboardButton(
+                    text="↩️ رجوع",
+                    callback_data="adm:home",
+                )],
             ]
         )
 
         await callback.message.edit_text(
             f'⚙️ <b>الإعدادات الحالية</b>\n\n'
-            f'🎁 مكافأة الإحالة: '
-            f'<b>{await db.get_setting("referral_reward")}</b>\n'
-            f'💸 الحد الأدنى للسحب: '
-            f'<b>{await db.get_setting("min_withdrawal")}</b>\n'
+            f'🎁 مكافأة الإحالة: <b>{await db.get_setting("referral_reward")}</b>\n'
+            f'💸 الحد الأدنى للسحب: <b>{await db.get_setting("min_withdrawal")}</b>\n'
             f'📨 حساب/وسيلة التواصل: '
             f'<b>{html.escape(str(await db.get_setting("admin_contact") or "غير محدد"))}</b>\n\n'
             f'اختر الإعداد الذي تريد تغييره:',
@@ -934,10 +878,8 @@ async def admin_callback(callback: CallbackQuery):
 
     elif action == "broadcast":
         await prompt_state(uid, "adm_broadcast")
-
         await callback.message.edit_text(
-            "📢 أرسل الرسالة التي تريد إذاعتها لكل المستخدمين "
-            "غير المحظورين.",
+            "📢 أرسل الرسالة التي تريد إذاعتها لكل المستخدمين غير المحظورين.",
             reply_markup=back_button("adm:home"),
         )
 
@@ -948,12 +890,8 @@ async def delete_channel(callback: CallbackQuery):
         await callback.answer("غير مصرح.", show_alert=True)
         return
 
-    await db.delete_channel(
-        int(callback.data.split(":")[1])
-    )
-
+    await db.delete_channel(int(callback.data.split(":")[1]))
     await callback.answer("تم الحذف")
-
     await callback.message.edit_text(
         "تم حذف القناة.",
         reply_markup=back_button("adm:home"),
@@ -966,12 +904,8 @@ async def delete_offer(callback: CallbackQuery):
         await callback.answer("غير مصرح.", show_alert=True)
         return
 
-    await db.delete_offer(
-        int(callback.data.split(":")[1])
-    )
-
+    await db.delete_offer(int(callback.data.split(":")[1]))
     await callback.answer("تم الحذف")
-
     await callback.message.edit_text(
         "تم حذف العرض.",
         reply_markup=back_button("adm:home"),
@@ -985,7 +919,6 @@ async def admin_settings_callback(callback: CallbackQuery):
         return
 
     key = callback.data.split(":")[1]
-
     mapping = {
         "referral": "adm_set_referral",
         "minwd": "adm_set_minwd",
@@ -993,7 +926,6 @@ async def admin_settings_callback(callback: CallbackQuery):
         "contact": "adm_set_contact",
         "wdinfo": "adm_set_wdinfo",
     }
-
     prompts = {
         "referral": "🎁 أرسل قيمة مكافأة الإحالة:",
         "minwd": "💸 أرسل الحد الأدنى للسحب:",
@@ -1003,19 +935,11 @@ async def admin_settings_callback(callback: CallbackQuery):
     }
 
     if key not in mapping:
-        await callback.answer(
-            "إعداد غير معروف.",
-            show_alert=True,
-        )
+        await callback.answer("إعداد غير معروف.", show_alert=True)
         return
 
-    await prompt_state(
-        callback.from_user.id,
-        mapping[key],
-    )
-
+    await prompt_state(callback.from_user.id, mapping[key])
     await callback.answer()
-
     await callback.message.edit_text(
         prompts[key],
         reply_markup=back_button("adm:home"),
@@ -1029,7 +953,6 @@ async def withdrawal_callback(callback: CallbackQuery):
         return
 
     _, action, withdrawal_id = callback.data.split(":")
-
     result = await db.process_withdrawal(
         int(withdrawal_id),
         action == "approve",
@@ -1043,25 +966,20 @@ async def withdrawal_callback(callback: CallbackQuery):
         return
 
     status, uid, amount = result
-
     await callback.answer("تمت المعالجة.")
-    await callback.message.edit_reply_markup(
-        reply_markup=None,
-    )
+    await callback.message.edit_reply_markup(reply_markup=None)
 
     try:
         if status == "approved":
             await bot.send_message(
                 uid,
-                f"✅ تم قبول طلب السحب "
-                f"<b>#{withdrawal_id}</b> وخصم "
-                f"<b>{money(amount)}</b> من رصيدك.",
+                f"✅ تم قبول طلب السحب <b>#{withdrawal_id}</b> "
+                f"وخصم <b>{money(amount)}</b> من رصيدك.",
             )
         else:
             await bot.send_message(
                 uid,
-                f"❌ تم رفض طلب السحب "
-                f"<b>#{withdrawal_id}</b>. "
+                f"❌ تم رفض طلب السحب <b>#{withdrawal_id}</b>. "
                 "لم يتم خصم الرصيد.",
             )
     except Exception:
@@ -1083,33 +1001,22 @@ async def handle_admin_state(
 
         try:
             uid_string, amount_string = [
-                part.strip()
-                for part in text.split("|", 1)
+                part.strip() for part in text.split("|", 1)
             ]
-
             uid = int(uid_string)
             amount = Decimal(amount_string)
 
             if not amount.is_finite() or amount <= 0:
                 raise ValueError
 
-            delta = (
-                amount
-                if state == "adm_add_balance"
-                else -amount
-            )
-
+            delta = amount if state == "adm_add_balance" else -amount
             action = (
-                "admin_add_balance"
-                if delta > 0
+                "admin_add_balance" if delta > 0
                 else "admin_deduct_balance"
             )
 
             new_balance = await db.change_balance(
-                uid,
-                delta,
-                action,
-                {"amount": str(amount)},
+                uid, delta, action, {"amount": str(amount)}
             )
 
             if new_balance is None:
@@ -1120,18 +1027,15 @@ async def handle_admin_state(
                 return
 
             await message.answer(
-                f"✅ تم التعديل. الرصيد الجديد: "
-                f"<b>{money(new_balance)}</b>",
+                f"✅ تم التعديل. الرصيد الجديد: <b>{money(new_balance)}</b>",
                 reply_markup=admin_menu(),
             )
 
             try:
                 operation = "إضافة" if delta > 0 else "خصم"
-
                 await bot.send_message(
                     uid,
-                    f"💰 تم {operation} "
-                    f"<b>{money(amount)}</b> من رصيدك.\n"
+                    f"💰 تم {operation} <b>{money(amount)}</b> من رصيدك.\n"
                     f"الرصيد الحالي: <b>{money(new_balance)}</b>",
                 )
             except Exception:
@@ -1142,27 +1046,20 @@ async def handle_admin_state(
 
         except Exception:
             await message.answer(
-                "❌ الصيغة الصحيحة: "
-                "<code>USER_ID|AMOUNT</code>",
+                "❌ الصيغة الصحيحة: <code>USER_ID|AMOUNT</code>",
                 reply_markup=admin_menu(),
             )
-
         return
 
     if state == "adm_gift":
         await clear_state(message.from_user.id)
 
         try:
-            parts = [
-                part.strip()
-                for part in text.split("|")
-            ]
-
+            parts = [part.strip() for part in text.split("|")]
             if len(parts) < 3:
                 raise ValueError
 
             code, amount_string, uses_string = parts[:3]
-
             amount = Decimal(amount_string)
             uses = int(uses_string)
 
@@ -1170,36 +1067,24 @@ async def handle_admin_state(
                 raise ValueError
 
             expires = None
-
             if len(parts) >= 4 and parts[3]:
                 from datetime import datetime, timezone
-
                 expires = datetime.strptime(
-                    parts[3],
-                    "%Y-%m-%d",
+                    parts[3], "%Y-%m-%d"
                 ).replace(tzinfo=timezone.utc)
 
-            await db.create_gift(
-                code.upper(),
-                amount,
-                uses,
-                expires,
-            )
-
+            await db.create_gift(code.upper(), amount, uses, expires)
             await message.answer(
                 f"✅ تم إنشاء الكود <code>{html.escape(code.upper())}</code> "
-                f"بقيمة <b>{money(amount)}</b> "
-                f"وعدد استخدامات {uses}.",
+                f"بقيمة <b>{money(amount)}</b> وعدد استخدامات {uses}.",
                 reply_markup=admin_menu(),
             )
 
         except Exception:
             await message.answer(
-                "❌ الصيغة: "
-                "<code>CODE|AMOUNT|MAX_USES|YYYY-MM-DD</code>",
+                "❌ الصيغة: <code>CODE|AMOUNT|MAX_USES|YYYY-MM-DD</code>",
                 reply_markup=admin_menu(),
             )
-
         return
 
     if state in {"adm_logs", "adm_ban", "adm_unban"}:
@@ -1237,55 +1122,28 @@ async def handle_admin_state(
                     f'— {html.escape(row["action"])}\n'
                 )
 
-            await message.answer(
-                output,
-                reply_markup=admin_menu(),
-            )
+            await message.answer(output, reply_markup=admin_menu())
 
         else:
-            await db.set_banned(
-                uid,
-                state == "adm_ban",
-            )
-
-            operation = (
-                "حظر"
-                if state == "adm_ban"
-                else "فك حظر"
-            )
-
+            await db.set_banned(uid, state == "adm_ban")
+            operation = "حظر" if state == "adm_ban" else "فك حظر"
             await message.answer(
                 f"✅ تم {operation} المستخدم.",
                 reply_markup=admin_menu(),
             )
-
         return
 
     if state == "adm_add_channel":
         try:
-            parts = [
-                part.strip()
-                for part in text.split("|", 2)
-            ]
-
+            parts = [part.strip() for part in text.split("|", 2)]
             if len(parts) != 3:
-                raise ValueError(
-                    "Expected CHAT_ID|TITLE|JOIN_URL"
-                )
+                raise ValueError
 
             chat_id, title, url = parts
-
             if not chat_id or not title or not url:
-                raise ValueError(
-                    "Channel fields cannot be empty"
-                )
+                raise ValueError
 
-            await db.add_channel(
-                chat_id,
-                title,
-                url,
-            )
-
+            await db.add_channel(chat_id, title, url)
             await clear_state(message.from_user.id)
 
             log.info(
@@ -1293,7 +1151,6 @@ async def handle_admin_state(
                 message.from_user.id,
                 chat_id,
             )
-
             await message.answer(
                 "✅ تمت إضافة القناة وحفظها.\n\n"
                 "تأكد من أن البوت يستطيع الوصول إلى القناة "
@@ -1303,18 +1160,15 @@ async def handle_admin_state(
 
         except Exception:
             log.exception("Failed to add forced-subscription channel")
-
             await message.answer(
                 "❌ لم تنجح إضافة القناة.\n"
-                "تأكد من الصيغة التالية:\n"
+                "تأكد من الصيغة:\n"
                 "<code>CHAT_ID|TITLE|JOIN_URL</code>\n\n"
                 "مثال:\n"
                 "<code>@mychannel|قناتي|https://t.me/mychannel</code>",
                 reply_markup=admin_menu(),
             )
-
             await clear_state(message.from_user.id)
-
         return
 
     if state == "adm_add_offer":
@@ -1322,7 +1176,6 @@ async def handle_admin_state(
 
         try:
             parts = text.split("|", 2)
-
             if len(parts) < 2:
                 raise ValueError
 
@@ -1333,12 +1186,7 @@ async def handle_admin_state(
             if not title or not description:
                 raise ValueError
 
-            await db.add_offer(
-                title,
-                description,
-                url,
-            )
-
+            await db.add_offer(title, description, url)
             await message.answer(
                 "✅ تمت إضافة العرض.",
                 reply_markup=admin_menu(),
@@ -1346,16 +1194,13 @@ async def handle_admin_state(
 
         except Exception:
             await message.answer(
-                "❌ الصيغة: "
-                "<code>TITLE|DESCRIPTION|URL</code>",
+                "❌ الصيغة: <code>TITLE|DESCRIPTION|URL</code>",
                 reply_markup=admin_menu(),
             )
-
         return
 
     if state == "adm_broadcast":
         await clear_state(message.from_user.id)
-
         rows = await db.all_user_ids()
         sent = 0
         failed = 0
@@ -1370,7 +1215,6 @@ async def handle_admin_state(
                 sent += 1
             except Exception:
                 failed += 1
-
             await asyncio.sleep(0.04)
 
         await status_message.edit_text(
@@ -1379,7 +1223,6 @@ async def handle_admin_state(
             f"❌ فشل: {failed}",
             reply_markup=admin_menu(),
         )
-
         return
 
     settings_map = {
@@ -1396,10 +1239,8 @@ async def handle_admin_state(
         if key in {"referral_reward", "min_withdrawal"}:
             try:
                 value = Decimal(text)
-
                 if not value.is_finite() or value < 0:
                     raise ValueError
-
             except Exception:
                 await message.answer(
                     "❌ قيمة غير صحيحة.",
@@ -1410,13 +1251,11 @@ async def handle_admin_state(
         try:
             await db.set_setting(key, text)
             await clear_state(message.from_user.id)
-
             log.info(
                 "Admin %s updated setting %s",
                 message.from_user.id,
                 key,
             )
-
             await message.answer(
                 "✅ تم حفظ الإعداد.",
                 reply_markup=admin_menu(),
@@ -1424,28 +1263,19 @@ async def handle_admin_state(
 
         except Exception:
             log.exception("Failed to save setting %s", key)
-
             await message.answer(
                 "❌ حدث خطأ أثناء حفظ الإعداد.",
                 reply_markup=admin_menu(),
             )
-
         return
 
 
 # ---------------------------- heartbeat ----------------------------
 
 async def heartbeat_loop():
-    """
-    يسجل رسالة في سجلات Render كل 3 دقائق.
-    """
     while True:
         await asyncio.sleep(180)
-
-        try:
-            log.info("HEARTBEAT: bot process is running")
-        except Exception:
-            pass
+        log.info("HEARTBEAT: bot process is running")
 
 
 # ---------------------------- FastAPI / Render ----------------------------
@@ -1453,23 +1283,17 @@ async def heartbeat_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     heartbeat_task = None
-
     await db.connect()
     log.info("Database connection established")
 
     try:
         if settings.webhook_url:
             await bot.set_webhook(
-                url=(
-                    f"{settings.webhook_url}"
-                    "/telegram/webhook"
-                ),
+                url=f"{settings.webhook_url}/telegram/webhook",
                 secret_token=settings.webhook_secret,
                 allowed_updates=dp.resolve_used_update_types(),
             )
-
             log.info("Webhook configured")
-
         else:
             log.warning(
                 "WEBHOOK_URL is empty; webhook is not configured."
@@ -1479,15 +1303,12 @@ async def lifespan(app: FastAPI):
             heartbeat_loop(),
             name="bot-heartbeat",
         )
-
         log.info("Heartbeat task started; interval=180 seconds")
-
         yield
 
     finally:
         if heartbeat_task is not None:
             heartbeat_task.cancel()
-
             try:
                 await heartbeat_task
             except asyncio.CancelledError:
@@ -1517,7 +1338,6 @@ async def health():
     try:
         await db.pool.fetchval("SELECT 1")
         return "ok"
-
     except Exception:
         log.exception("Health check failed")
         raise HTTPException(
@@ -1532,22 +1352,15 @@ async def telegram_webhook(request: Request):
         token = request.headers.get(
             "X-Telegram-Bot-Api-Secret-Token"
         )
-
         if token != settings.webhook_secret:
-            raise HTTPException(
-                status_code=403,
-                detail="forbidden",
-            )
+            raise HTTPException(status_code=403, detail="forbidden")
 
     data = await request.json()
-
     update = Update.model_validate(
         data,
         context={"bot": bot},
     )
-
     await dp.feed_update(bot, update)
-
     return {"ok": True}
 
 
