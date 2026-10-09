@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import os
 import re
@@ -55,7 +56,6 @@ async def get_bot_username() -> str:
 async def check_forced_subscription(user_id: int) -> bool:
     """
     التحقق من اشتراك المستخدم في جميع القنوات الإلزامية.
-    يجب أن يكون البوت قادراً على الوصول إلى كل قناة والتحقق من العضوية.
     """
     channels = await db.list_channels()
 
@@ -423,9 +423,6 @@ async def all_text(message: Message):
     if not await guard(message):
         return
 
-    # إصلاح مهم:
-    # اقرأ حالة المستخدم أولاً، واسمح للأدمن بإكمال عملياته
-    # قبل فحص الاشتراك الإجباري.
     state, data = await db.get_state(message.from_user.id)
     text = (message.text or "").strip()
 
@@ -436,79 +433,133 @@ async def all_text(message: Message):
     ):
         return await handle_admin_state(message, state, text)
 
-    # بقية المستخدمين يجب أن يكملوا الاشتراك الإجباري.
     if not await check_forced_subscription(message.from_user.id):
         await send_force_sub(message)
         return
 
     await db.finalize_referral(message.from_user.id)
 
+    # الخطوة الأولى: استقبال مبلغ السحب والتحقق منه.
     if state == "withdraw_amount":
-        await clear_state(message.from_user.id)
-
         try:
             amount = Decimal(text.replace(",", "."))
-        except InvalidOperation:
-            await message.answer("❌ أرسل مبلغاً رقمياً صحيحاً.")
+            if not amount.is_finite() or amount <= 0:
+                raise InvalidOperation
+        except (InvalidOperation, ValueError):
+            await clear_state(message.from_user.id)
+            await message.answer(
+                "❌ أرسل مبلغاً رقمياً صحيحاً أكبر من صفر."
+            )
             return
 
-        min_withdrawal = Decimal(
-            await db.get_setting("min_withdrawal", "5000")
-        )
+        try:
+            min_withdrawal = Decimal(
+                await db.get_setting("min_withdrawal", "5000")
+            )
+        except (InvalidOperation, ValueError):
+            min_withdrawal = Decimal("5000")
 
         if amount < min_withdrawal:
+            await clear_state(message.from_user.id)
             await message.answer(
                 f"❌ الحد الأدنى للسحب هو "
                 f"<b>{money(min_withdrawal)}</b>."
             )
             return
 
-        if amount <= 0:
+        user = await db.get_user(message.from_user.id)
+        if not user or Decimal(user["balance"]) < amount:
+            await clear_state(message.from_user.id)
             await message.answer(
-                "❌ المبلغ يجب أن يكون أكبر من صفر."
+                "❌ رصيدك غير كافٍ لهذا المبلغ."
+            )
+            return
+
+        # نحفظ المبلغ مؤقتاً ونطلب رقم Tel Cash.
+        await prompt_state(
+            message.from_user.id,
+            "withdraw_tel_cash",
+            {"amount": str(amount)},
+        )
+
+        await message.answer(
+            "📱 <b>رقم حساب Tel Cash</b>\n\n"
+            "أرسل رقم حساب Tel Cash الذي تريد استلام مبلغ السحب عليه.\n"
+            "تأكد من صحة الرقم قبل إرساله."
+        )
+        return
+
+    # الخطوة الثانية: استقبال رقم Tel Cash وإنشاء طلب السحب.
+    if state == "withdraw_tel_cash":
+        raw_number = text
+
+        if not re.fullmatch(r"\+?[0-9][0-9 \-]{5,18}[0-9]", raw_number):
+            await message.answer(
+                "❌ رقم الحساب غير صحيح.\n"
+                "أرسل رقم Tel Cash بالأرقام فقط، ويمكنك استخدام + أو مسافات أو شرطات."
+            )
+            return
+
+        tel_cash_number = re.sub(r"[ \-]", "", raw_number)
+
+        try:
+            amount = Decimal(str(data["amount"]))
+            if not amount.is_finite() or amount <= 0:
+                raise InvalidOperation
+        except (KeyError, InvalidOperation, ValueError, TypeError):
+            await clear_state(message.from_user.id)
+            await message.answer(
+                "❌ انتهت جلسة طلب السحب. اضغط «💸 سحب رصيد» وابدأ من جديد."
             )
             return
 
         result = await db.create_withdrawal(
             message.from_user.id,
             amount,
+            tel_cash_number,
         )
+
+        await clear_state(message.from_user.id)
 
         if result == "pending":
             await message.answer(
                 "⏳ لديك طلب سحب قيد المراجعة بالفعل."
             )
+            return
 
-        elif result is None:
+        if result is None:
             await message.answer(
-                "❌ رصيدك غير كافٍ لهذا المبلغ."
+                "❌ رصيدك غير كافٍ لهذا المبلغ، أو تعذر إنشاء الطلب."
             )
+            return
 
-        else:
-            user = await db.get_user(message.from_user.id)
+        user = await db.get_user(message.from_user.id)
+        safe_number = html.escape(tel_cash_number)
 
-            await message.answer(
-                f"✅ تم إرسال طلب السحب رقم "
-                f"<code>#{result}</code> بقيمة "
-                f"<b>{money(amount)}</b>.\n"
-                "سيتم مراجعته من الإدارة."
-            )
+        await message.answer(
+            f"✅ تم إرسال طلب السحب رقم "
+            f"<code>#{result}</code> بقيمة "
+            f"<b>{money(amount)}</b>.\n"
+            f"📱 رقم Tel Cash: <code>{safe_number}</code>\n"
+            "سيتم مراجعته من الإدارة."
+        )
 
-            for admin_id in settings.admin_ids:
-                try:
-                    await bot.send_message(
-                        admin_id,
-                        f'💸 <b>طلب سحب جديد #{result}</b>\n\n'
-                        f'👤 المستخدم: <code>{user["id"]}</code>\n'
-                        f'💰 المبلغ: <b>{money(amount)}</b>\n'
-                        f'👥 الإحالات: <b>{user["referrals"]}</b>',
-                        reply_markup=withdrawal_actions(result),
-                    )
-                except Exception:
-                    log.exception(
-                        "Failed to notify admin %s about withdrawal",
-                        admin_id,
-                    )
+        for admin_id in settings.admin_ids:
+            try:
+                await bot.send_message(
+                    admin_id,
+                    f'💸 <b>طلب سحب جديد #{result}</b>\n\n'
+                    f'👤 المستخدم: <code>{user["id"]}</code>\n'
+                    f'💰 المبلغ: <b>{money(amount)}</b>\n'
+                    f'📱 Tel Cash: <code>{safe_number}</code>\n'
+                    f'👥 الإحالات: <b>{user["referrals"]}</b>',
+                    reply_markup=withdrawal_actions(result),
+                )
+            except Exception:
+                log.exception(
+                    "Failed to notify admin %s about withdrawal",
+                    admin_id,
+                )
 
         return
 
@@ -547,8 +598,8 @@ async def all_text(message: Message):
                     admin_id,
                     f'📨 <b>رسالة من مستخدم</b>\n\n'
                     f'🆔 <code>{user["id"]}</code>\n'
-                    f'👤 @{user["username"] or "-"}\n\n'
-                    f'{text}',
+                    f'👤 @{html.escape(user["username"] or "-")}\n\n'
+                    f'{html.escape(text)}',
                 )
                 sent = True
             except Exception:
@@ -590,7 +641,9 @@ async def all_text(message: Message):
                 or "لم أستطع توليد إجابة."
             )
 
-            await message.answer(f"🤖 {answer}")
+            await message.answer(
+                html.escape(answer)
+            )
 
         except Exception:
             log.exception("OpenAI request failed")
@@ -708,12 +761,17 @@ async def admin_callback(callback: CallbackQuery):
             return
 
         for row in rows:
+            safe_number = html.escape(
+                str(row.get("tel_cash_number") or "-")
+            )
+
             await callback.message.answer(
                 f'💸 <b>طلب #{row["id"]}</b>\n'
                 f'🆔 <code>{row["user_id"]}</code>\n'
                 f'💰 <b>{money(row["amount"])}</b>\n'
+                f'📱 Tel Cash: <code>{safe_number}</code>\n'
                 f'👥 إحالات: <b>{row["referrals"]}</b>\n'
-                f'👤 @{row["username"] or "-"}',
+                f'👤 @{html.escape(row["username"] or "-")}',
                 reply_markup=withdrawal_actions(row["id"]),
             )
 
@@ -869,7 +927,7 @@ async def admin_callback(callback: CallbackQuery):
             f'💸 الحد الأدنى للسحب: '
             f'<b>{await db.get_setting("min_withdrawal")}</b>\n'
             f'📨 حساب/وسيلة التواصل: '
-            f'<b>{await db.get_setting("admin_contact") or "غير محدد"}</b>\n\n'
+            f'<b>{html.escape(str(await db.get_setting("admin_contact") or "غير محدد"))}</b>\n\n'
             f'اختر الإعداد الذي تريد تغييره:',
             reply_markup=keyboard,
         )
@@ -1032,7 +1090,7 @@ async def handle_admin_state(
             uid = int(uid_string)
             amount = Decimal(amount_string)
 
-            if amount <= 0:
+            if not amount.is_finite() or amount <= 0:
                 raise ValueError
 
             delta = (
@@ -1108,6 +1166,9 @@ async def handle_admin_state(
             amount = Decimal(amount_string)
             uses = int(uses_string)
 
+            if not amount.is_finite() or amount <= 0 or uses <= 0:
+                raise ValueError
+
             expires = None
 
             if len(parts) >= 4 and parts[3]:
@@ -1126,7 +1187,7 @@ async def handle_admin_state(
             )
 
             await message.answer(
-                f"✅ تم إنشاء الكود <code>{code.upper()}</code> "
+                f"✅ تم إنشاء الكود <code>{html.escape(code.upper())}</code> "
                 f"بقيمة <b>{money(amount)}</b> "
                 f"وعدد استخدامات {uses}.",
                 reply_markup=admin_menu(),
@@ -1173,7 +1234,7 @@ async def handle_admin_state(
             for row in logs[:15]:
                 output += (
                     f'• {row["created_at"]:%Y-%m-%d %H:%M} '
-                    f'— {row["action"]}\n'
+                    f'— {html.escape(row["action"])}\n'
                 )
 
             await message.answer(
@@ -1219,14 +1280,12 @@ async def handle_admin_state(
                     "Channel fields cannot be empty"
                 )
 
-            # احفظ القناة في قاعدة البيانات.
             await db.add_channel(
                 chat_id,
                 title,
                 url,
             )
 
-            # امسح الحالة بعد نجاح الحفظ فقط.
             await clear_state(message.from_user.id)
 
             log.info(
@@ -1338,7 +1397,7 @@ async def handle_admin_state(
             try:
                 value = Decimal(text)
 
-                if value < 0:
+                if not value.is_finite() or value < 0:
                     raise ValueError
 
             except Exception:
@@ -1386,7 +1445,6 @@ async def heartbeat_loop():
         try:
             log.info("HEARTBEAT: bot process is running")
         except Exception:
-            # لا نسمح لتعذر كتابة سجل بتعطيل المهمة.
             pass
 
 
