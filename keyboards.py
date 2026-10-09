@@ -6,26 +6,35 @@ from aiogram.types import (
 )
 
 
-def main_menu():
-    """القائمة الرئيسية للمستخدم."""
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(text="👤 الملف الشخصي"),
-                KeyboardButton(text="👥 الإحالات"),
-            ],
-            [
-                KeyboardButton(text="💸 سحب الأرباح"),
-                KeyboardButton(text="🎁 كود الهدية"),
-            ],
-            [
-                KeyboardButton(text="🎯 العروض"),
-                KeyboardButton(text="📞 التواصل"),
-            ],
-            [
-                KeyboardButton(text="🤖 الذكاء الاصطناعي"),
-            ],
+def main_menu(is_admin=False):
+    """القائمة الرئيسية، مع إظهار زر الإدارة للأدمن فقط."""
+    keyboard = [
+        [
+            KeyboardButton(text="👤 الملف الشخصي"),
+            KeyboardButton(text="👥 الإحالات"),
         ],
+        [
+            KeyboardButton(text="💸 سحب الأرباح"),
+            KeyboardButton(text="🎁 كود الهدية"),
+        ],
+        [
+            KeyboardButton(text="🎯 العروض"),
+            KeyboardButton(text="📞 التواصل"),
+        ],
+        [
+            KeyboardButton(text="🤖 الذكاء الاصطناعي"),
+        ],
+    ]
+
+    if is_admin:
+        keyboard.append(
+            [
+                KeyboardButton(text="🛠 لوحة الأدمن"),
+            ]
+        )
+
+    return ReplyKeyboardMarkup(
+        keyboard=keyboard,
         resize_keyboard=True,
         input_field_placeholder="اختر من القائمة 👇",
     )
