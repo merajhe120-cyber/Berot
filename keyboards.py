@@ -10,19 +10,19 @@ def main_menu(is_admin=False):
     """القائمة الرئيسية، مع إظهار زر الإدارة للأدمن فقط."""
     keyboard = [
         [
-            KeyboardButton(text="👤 الملف الشخصي"),
-            KeyboardButton(text="👥 الإحالات"),
+            KeyboardButton(text="👤 معلومات ملفي"),
+            KeyboardButton(text="🔗 رابط إحالتي"),
         ],
         [
-            KeyboardButton(text="💸 سحب الأرباح"),
-            KeyboardButton(text="🎁 كود الهدية"),
+            KeyboardButton(text="💸 سحب رصيد"),
+            KeyboardButton(text="🎁 كود هدية"),
         ],
         [
             KeyboardButton(text="🎯 العروض"),
-            KeyboardButton(text="📞 التواصل"),
+            KeyboardButton(text="📨 تواصل معنا"),
         ],
         [
-            KeyboardButton(text="🤖 الذكاء الاصطناعي"),
+            KeyboardButton(text="🤖 اسأل الذكاء الاصطناعي"),
         ],
     ]
 
@@ -155,6 +155,7 @@ def force_sub_keyboard(channels):
 
     for channel in channels or []:
         title = channel.get("title") or "القناة"
+
         join_url = normalize_join_url(
             channel.get("join_url") or ""
         )
@@ -178,7 +179,9 @@ def force_sub_keyboard(channels):
         ]
     )
 
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return InlineKeyboardMarkup(
+        inline_keyboard=rows
+    )
 
 
 def withdrawal_actions(withdrawal_id):
@@ -189,13 +192,13 @@ def withdrawal_actions(withdrawal_id):
                 InlineKeyboardButton(
                     text="✅ قبول الطلب",
                     callback_data=(
-                        f"adm:withdraw_approve:{withdrawal_id}"
+                        f"wd:approve:{withdrawal_id}"
                     ),
                 ),
                 InlineKeyboardButton(
                     text="❌ رفض الطلب",
                     callback_data=(
-                        f"adm:withdraw_reject:{withdrawal_id}"
+                        f"wd:reject:{withdrawal_id}"
                     ),
                 ),
             ]
@@ -203,7 +206,10 @@ def withdrawal_actions(withdrawal_id):
     )
 
 
-def back_button(callback_data="adm:home", text="🔙 رجوع"):
+def back_button(
+    callback_data="adm:home",
+    text="🔙 رجوع",
+):
     """زر رجوع قابل لإعادة الاستخدام."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
